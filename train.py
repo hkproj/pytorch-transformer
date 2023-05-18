@@ -1,5 +1,5 @@
 from model import build_transformer, causal_mask
-import spacy
+from datasets import load_dataset
 import os
 from os.path import exists
 import torchtext.datasets as datasets
@@ -11,6 +11,13 @@ import warnings
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from pathlib import Path
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.trainers import WordLevelTrainer
+from tokenizers.pre_tokenizers import Whitespace
+import itertools
+import torchmetrics
+from torch.utils.tensorboard import SummaryWriter
 
 class bcolors:
     HEADER = '\033[95m'
@@ -23,111 +30,33 @@ class bcolors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
-def load_tokenizers():
+class BilingualDataset(Dataset):
 
-    try:
-        spacy_de = spacy.load("de_core_news_sm")
-    except IOError:
-        os.system("python -m spacy download de_core_news_sm")
-        spacy_de = spacy.load("de_core_news_sm")
-
-    try:
-        spacy_en = spacy.load("en_core_web_sm")
-    except IOError:
-        os.system("python -m spacy download en_core_web_sm")
-        spacy_en = spacy.load("en_core_web_sm")
-
-    return spacy_de, spacy_en
-
-
-def tokenize(text, tokenizer):
-    return [tok.text for tok in tokenizer.tokenizer(text)]
-
-
-def yield_tokens(data_iter, tokenizer, index):
-    for from_to_tuple in data_iter:
-        yield tokenizer(from_to_tuple[index])
-
-
-def build_vocabulary(spacy_de, spacy_en):
-
-    print("Building German Vocabulary ...")
-    train, val, test = datasets.Multi30k(language_pair=("de", "en"))
-    vocab_src = build_vocab_from_iterator(
-        # Index = 0 means to extract the first sentence from the pair (German)
-        yield_tokens(train + val + test,
-                     lambda text: tokenize(text, spacy_de), index=0),
-        min_freq=2,  # Minimum frquency to include a token in the vocabulary
-        specials=["<s>", "</s>", "<blank>", "<unk>"],
-    )
-
-    print("Building English Vocabulary ...")
-    train, val, test = datasets.Multi30k(language_pair=("de", "en"))
-    vocab_tgt = build_vocab_from_iterator(
-        # Index = 1 means to extract the second sentence from the pair (English)
-        yield_tokens(train + val + test,
-                     lambda text: tokenize(text, spacy_en), index=1),
-        min_freq=2,  # Minimum frquency to include a token in the vocabulary
-        specials=["<s>", "</s>", "<blank>", "<unk>"],
-    )
-
-    assert vocab_src['<s>'] == vocab_tgt['<s>']
-    assert vocab_src['</s>'] == vocab_tgt['</s>']
-    assert vocab_src['<blank>'] == vocab_tgt['<blank>']
-    assert vocab_src['<unk>'] == vocab_tgt['<unk>']
-
-    # Set the position of the <unk> token to be used for OOV words.
-    vocab_src.set_default_index(vocab_src["<unk>"])
-    vocab_tgt.set_default_index(vocab_tgt["<unk>"])
-
-    return vocab_src, vocab_tgt
-
-
-def load_vocab(spacy_de, spacy_en):
-    if not exists("vocab.pt"):
-        vocab_src, vocab_tgt = build_vocabulary(spacy_de, spacy_en)
-        torch.save((vocab_src, vocab_tgt), "vocab.pt")
-    else:
-        vocab_src, vocab_tgt = torch.load("vocab.pt")
-    return vocab_src, vocab_tgt
-
-
-class GermanEnglishDataset(Dataset):
-
-    def __init__(self, spacy_de, spacy_en, vocab_src, vocab_tgt, tokenize_src, tokenize_tgt, seq_len, split, device):
+    def __init__(self, ds, tokenizer_src, tokenizer_tgt, src_lang, tgt_lang, seq_len):
         super().__init__()
-        self.split = split
-        self.vocab_src = vocab_src
-        self.vocab_tgt = vocab_tgt
-        self.spacy_de = spacy_de
-        self.spacy_en = spacy_en
         self.seq_len = seq_len
-        self.device = device
-        self.tokenize_src = tokenize_src
-        self.tokenize_tgt = tokenize_tgt
 
-        self.sos_token = torch.tensor([self.vocab_tgt["<s>"]], device=device)
-        self.eos_token = torch.tensor([self.vocab_tgt["</s>"]], device=device)
-        self.pad_token = torch.tensor(
-            [self.vocab_tgt["<blank>"]], device=device)
+        self.ds = ds
+        self.tokenizer_src = tokenizer_src
+        self.tokenizer_tgt = tokenizer_tgt
+        self.src_lang = src_lang
+        self.tgt_lang = tgt_lang
 
-        ds = datasets.Multi30k(language_pair=("de", "en"), split=split)
-
-        self.data = []
-        for entry in ds:
-            self.data.append(entry)
+        self.sos_token = torch.tensor([tokenizer_tgt.token_to_id("[SOS]")], dtype=torch.int64)
+        self.eos_token = torch.tensor([tokenizer_tgt.token_to_id("[EOS]")], dtype=torch.int64)
+        self.pad_token = torch.tensor([tokenizer_tgt.token_to_id("[PAD]")], dtype=torch.int64)
 
     def __len__(self):
-        return len(self.data)
+        return len(self.ds)
 
     def __getitem__(self, idx):
-        src_target_pair = self.data[idx]
-        src_text = src_target_pair[0]
-        tgt_text = src_target_pair[1]
+        src_target_pair = self.ds[idx]
+        src_text = src_target_pair['translation'][self.src_lang]
+        tgt_text = src_target_pair['translation'][self.tgt_lang]
 
         # Transform the text into tokens
-        enc_input_tokens = self.vocab_src(self.tokenize_src(src_text))
-        dec_input_tokens = self.vocab_tgt(self.tokenize_tgt(tgt_text))
+        enc_input_tokens = self.tokenizer_src.encode(src_text).ids
+        dec_input_tokens = self.tokenizer_tgt.encode(tgt_text).ids
 
         # Add sos, eos and padding to each sentence
         enc_num_padding_tokens = self.seq_len - len(enc_input_tokens) - 2  # We will add <s> and </s>
@@ -142,9 +71,9 @@ class GermanEnglishDataset(Dataset):
         encoder_input = torch.cat(
             [
                 self.sos_token,
-                torch.tensor(enc_input_tokens, dtype=torch.int64, device=self.device),
+                torch.tensor(enc_input_tokens, dtype=torch.int64),
                 self.eos_token,
-                torch.tensor([self.pad_token] * enc_num_padding_tokens, dtype=torch.int64, device=self.device),
+                torch.tensor([self.pad_token] * enc_num_padding_tokens, dtype=torch.int64),
             ],
             dim=0,
         )
@@ -153,8 +82,8 @@ class GermanEnglishDataset(Dataset):
         decoder_input = torch.cat(
             [
                 self.sos_token,
-                torch.tensor(dec_input_tokens, dtype=torch.int64,device=self.device),
-                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype=torch.int64, device=self.device),
+                torch.tensor(dec_input_tokens, dtype=torch.int64),
+                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype=torch.int64),
             ],
             dim=0,
         )
@@ -162,12 +91,17 @@ class GermanEnglishDataset(Dataset):
         # Add only </s> token
         label = torch.cat(
             [
-                torch.tensor(dec_input_tokens, dtype=torch.int64, device=self.device),
+                torch.tensor(dec_input_tokens, dtype=torch.int64),
                 self.eos_token,
-                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype=torch.int64, device=self.device),
+                torch.tensor([self.pad_token] * dec_num_padding_tokens, dtype=torch.int64),
             ],
             dim=0,
         )
+
+        # Double check the size of the tensors to make sure they are all seq_len long
+        assert encoder_input.size(0) == self.seq_len
+        assert decoder_input.size(0) == self.seq_len
+        assert label.size(0) == self.seq_len
 
         return {
             "encoder_input": encoder_input,  # (seq_len)
@@ -186,9 +120,9 @@ def rate(step, model_size, factor, warmup):
     return factor * (model_size ** (-0.5) * min(step ** (-0.5), step * warmup ** (-1.5)))
 
 
-def greedy_decode(model, source, source_mask, vocab_src, vocab_tgt, max_len, device):
-    sos_idx = vocab_src['<s>']
-    eos_idx = vocab_src['</s>']
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+    sos_idx = tokenizer_tgt.token_to_id('[SOS]')
+    eos_idx = tokenizer_tgt.token_to_id('[EOS]')
 
     encoder_output = model.encode(source, source_mask)
     decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device)
@@ -217,10 +151,14 @@ def greedy_decode(model, source, source_mask, vocab_src, vocab_tgt, max_len, dev
     return decoder_input.squeeze(0)
 
 
-def run_validation(model, validation_ds, vocab_src, vocab_tgt, max_len, device, print_msg):
+def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_step, writer):
     model.eval()
     num_examples = 2
     count = 0
+
+    source_texts = []
+    target_texts = []
+    model_out_texts = []
 
     with torch.no_grad():
         for batch in validation_ds:
@@ -233,11 +171,15 @@ def run_validation(model, validation_ds, vocab_src, vocab_tgt, max_len, device, 
                 0) == 1, "Batch size must be 1 for validation"
 
             model_out = greedy_decode(
-                model, encoder_input, encoder_mask, vocab_src, vocab_tgt, max_len, device)
+                model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
 
-            source_text = batch["src_text"]
-            target_text = batch["tgt_text"]
-            model_out_text = " ".join([vocab_tgt.vocab.itos_[idx] for idx in model_out.cpu().numpy()])
+            source_text = batch["src_text"][0]
+            target_text = batch["tgt_text"][0]
+            model_out_text = tokenizer_tgt.decode(model_out.cpu().numpy())
+
+            source_texts.append(source_text)
+            target_texts.append(target_text)
+            model_out_texts.append(model_out_text)
 
             # get the console window width
             with os.popen('stty size', 'r') as console:
@@ -246,40 +188,78 @@ def run_validation(model, validation_ds, vocab_src, vocab_tgt, max_len, device, 
             
             # Print the source, target and model output
             print_msg('-'*console_width)
-            print_msg(f"{f'{bcolors.OKBLUE}German:{bcolors.ENDC} ':>20}{source_text}")
-            print_msg(f"{f'{bcolors.OKCYAN}English:{bcolors.ENDC} ':>20}{target_text}")
-            print_msg(f"{f'{bcolors.OKGREEN}Model:{bcolors.ENDC} ':>20}{model_out_text}")
+            print_msg(f"{f'{bcolors.OKBLUE}SOURCE:{bcolors.ENDC} ':>20}{source_text[:console_width-20]}")
+            print_msg(f"{f'{bcolors.OKCYAN}TARGET:{bcolors.ENDC} ':>20}{target_text[:console_width-20]}")
+            print_msg(f"{f'{bcolors.OKGREEN}PREDICTED:{bcolors.ENDC} ':>20}{model_out_text[:console_width-20]}")
 
             if count == num_examples:
                 print_msg('-'*console_width)
                 break
+    
+    # Evaluate the character error rate
+    # Compute the char error rate 
+    metric = torchmetrics.CharErrorRate()
+    cer = metric(model_out_texts, target_texts)
+    writer.add_scalar('validation cer', cer, global_step)
+    writer.flush()
 
-def get_config():
-    return {
-        "batch_size": 64,
-        "num_epochs": 20,
-        "accum_iter": 10,
-        "base_lr": 1.0,
-        "seq_len": 72,
-        "warmup": 1000,
-        "d_model": 512
-    }
+    # Compute the word error rate
+    metric = torchmetrics.WordErrorRate()
+    wer = metric(model_out_texts, target_texts)
+    writer.add_scalar('validation wer', wer, global_step)
+    writer.flush()
+
+def get_all_sentences(ds, lang):
+    for item in ds:
+        yield item['translation'][lang]
+
+def get_or_build_tokenizer(config, ds, lang):
+    tokenizer_path = Path(config['tokenizer_file'].format(lang))
+    if not Path.exists(tokenizer_path):
+        # Most code taken from: https://huggingface.co/docs/tokenizers/quicktour
+        tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
+        tokenizer.pre_tokenizer = Whitespace()
+        trainer = WordLevelTrainer(special_tokens=["[UNK]", "[PAD]", "[SOS]", "[EOS]"], min_frequency=2)
+        tokenizer.train_from_iterator(get_all_sentences(ds, lang), trainer=trainer)
+        tokenizer.save(str(tokenizer_path))
+    else:
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+    return tokenizer
 
 def get_ds(config):
-    spacy_de, spacy_en = load_tokenizers()
-    vocab_src, vocab_tgt = load_vocab(spacy_de, spacy_en)
-    train_ds = GermanEnglishDataset(spacy_de, spacy_en, vocab_src, vocab_tgt, lambda text: tokenize(
-        text, spacy_de), lambda text: tokenize(text, spacy_en), 72, 'train', 'cpu')
+    # It only has the train split, so we divide it overselves
+    ds_raw = load_dataset('opus_books', f"{config['lang_src']}-{config['lang_tgt']}", split='train')
 
-    # Split the dataset into train and validation
-    train_ds_size = int(0.9 * len(train_ds))
-    val_ds_size = len(train_ds) - train_ds_size
-    train_ds, val_ds = random_split(train_ds, [train_ds_size, val_ds_size])
+    # Build tokenizers
+    tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
+    tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config['lang_tgt'])
+
+    # Keep 90% for training, 10% for validation
+    train_ds_size = int(0.9 * len(ds_raw))
+    val_ds_size = len(ds_raw) - train_ds_size
+    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size])
+
+    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
+    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
 
     train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
     val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
 
-    return train_dataloader, val_dataloader, vocab_src, vocab_tgt
+    return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
+
+def get_config():
+    return {
+        "batch_size": 4,
+        "num_epochs": 20,
+        "accum_iter": 10,
+        "base_lr": 1.0,
+        "seq_len": 512,
+        "warmup": 10000,
+        "d_model": 512,
+        "lang_src": "en",
+        "lang_tgt": "it",
+        "tokenizer_file": "tokenizer_{0}.json",
+    }
 
 def get_model(config, vocab_src_len, vocab_tgt_len):
     model = build_transformer(vocab_src_len, vocab_tgt_len, config["seq_len"], config['seq_len'], d_model=config['d_model'])
@@ -290,8 +270,11 @@ def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
     config = get_config()
-    train_dataloader, val_dataloader, vocab_src, vocab_tgt = get_ds(config)
-    model = get_model(config, len(vocab_src), len(vocab_tgt)).to(device)
+    train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
+    model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
+
+    # Tensorboard
+    writer = SummaryWriter()
 
     # Optimizer with its LR scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=config['base_lr'], betas=(0.9, 0.98), eps=1e-9)
@@ -302,7 +285,7 @@ def train_model():
         ),
     )
 
-    loss_fn = nn.CrossEntropyLoss(ignore_index=vocab_tgt["<blank>"], label_smoothing=0.1).to(device)
+    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
     global_step = 0
     for epoch in range(config['num_epochs']):
@@ -324,8 +307,12 @@ def train_model():
             label = batch['label'].to(device)
 
             # Compute the loss using a simple cross entropy
-            loss = loss_fn(proj_output.view(-1, len(vocab_tgt)), label.view(-1))
+            loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
             batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}", "lr": f"{lr_scheduler.get_last_lr()[0]:6.1e}", "epoch step": f"{epoch_step:03d}"})
+
+            # Log the loss
+            writer.add_scalar('train loss', loss.item(), global_step)
+            writer.flush()
 
             loss.backward()
 
@@ -337,7 +324,7 @@ def train_model():
             epoch_step += 1
 
         # Run validation at the end of every epoch
-        run_validation(model, val_dataloader, vocab_src, vocab_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg))
+        run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
 
         model_folder = "weights"
         model_filename = f"tmodel_{epoch:02d}.pt"
