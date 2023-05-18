@@ -10,6 +10,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import warnings
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
+from pathlib import Path
 
 class bcolors:
     HEADER = '\033[95m'
@@ -216,7 +217,7 @@ def greedy_decode(model, source, source_mask, vocab_src, vocab_tgt, max_len, dev
     return decoder_input.squeeze(0)
 
 
-def run_validation(model, validation_ds, vocab_src, vocab_tgt, max_len, device, print_msg, global_step):
+def run_validation(model, validation_ds, vocab_src, vocab_tgt, max_len, device, print_msg):
     model.eval()
     num_examples = 2
     count = 0
@@ -242,9 +243,8 @@ def run_validation(model, validation_ds, vocab_src, vocab_tgt, max_len, device, 
             with os.popen('stty size', 'r') as console:
                 _, console_width = console.read().split()
                 console_width = int(console_width)
-            if count == 1:
-                global_step_str = f'GLOBAL STEP: {global_step:05d}'
-                print_msg(f"{global_step_str:^{console_width}}")
+            
+            # Print the source, target and model output
             print_msg('-'*console_width)
             print_msg(f"{f'{bcolors.OKBLUE}German:{bcolors.ENDC} ':>20}{source_text}")
             print_msg(f"{f'{bcolors.OKCYAN}English:{bcolors.ENDC} ':>20}{target_text}")
@@ -257,13 +257,12 @@ def run_validation(model, validation_ds, vocab_src, vocab_tgt, max_len, device, 
 def get_config():
     return {
         "batch_size": 64,
-        "num_epochs": 8,
+        "num_epochs": 20,
         "accum_iter": 10,
         "base_lr": 1.0,
         "seq_len": 72,
         "warmup": 1000,
-        "d_model": 512,
-        "validation_interval": 100
+        "d_model": 512
     }
 
 def get_ds(config):
@@ -334,18 +333,18 @@ def train_model():
             optimizer.zero_grad(set_to_none=True)
             lr_scheduler.step()  # Update learning rate schedule
 
-            # Run validation every few steps
-            if global_step % config['validation_interval'] == 0:
-                run_validation(model, val_dataloader, vocab_src, vocab_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step)
-
             global_step += 1
             epoch_step += 1
 
+        # Run validation at the end of every epoch
+        run_validation(model, val_dataloader, vocab_src, vocab_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg))
+
+        model_folder = "weights"
         model_filename = f"tmodel_{epoch:02d}.pt"
         if epoch == config['num_epochs'] - 1:
             model_filename = "tmodel_final.pt"
         # Save the model
-        torch.save(model.state_dict(), model_filename)
+        torch.save(model.state_dict(), str(Path('.') / model_folder / model_filename))
 
 
 if __name__ == '__main__':
