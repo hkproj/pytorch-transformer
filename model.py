@@ -101,7 +101,6 @@ class MultiHeadAttentionBlock(nn.Module):
         d_k = query.shape[-1]
         # Just apply the formula from the paper
         # (batch, h, seq_len, d_k) --> (batch, h, seq_len, seq_len)
-        # Calculate attention score using @ operator
         attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
         if mask is not None:
             # Write a very low value (indicating -inf) to the positions where mask == 0

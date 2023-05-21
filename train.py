@@ -107,7 +107,7 @@ class BilingualDataset(Dataset):
             "encoder_input": encoder_input,  # (seq_len)
             "decoder_input": decoder_input,  # (seq_len)
             "encoder_mask": (encoder_input != self.pad_token).unsqueeze(0).unsqueeze(0).int(), # (1, 1, seq_len)
-            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0).int() & causal_mask(decoder_input.size(0)), # (1, seq_len, seq_len),
+            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0).int() & causal_mask(decoder_input.size(0)), # (1, seq_len) & (1, seq_len, seq_len),
             "label": label,  # (seq_len)
             "src_text": src_text,
             "tgt_text": tgt_text,
@@ -124,19 +124,19 @@ def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
     eos_idx = tokenizer_tgt.token_to_id('[EOS]')
 
+    # Precompute the encoder output and reuse it for every step
     encoder_output = model.encode(source, source_mask)
+    # Initialize the decoder input with the sos token
     decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device)
     while True:
         if decoder_input.size(1) == max_len:
             break
 
         # build mask for target
-        decoder_mask = causal_mask(decoder_input.size(
-            1)).type_as(source_mask).to(device)
+        decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
 
         # calculate output
-        out = model.decode(encoder_output, source_mask,
-                           decoder_input, decoder_mask)
+        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
 
         # get next token
         prob = model.project(out[:, -1])
@@ -163,19 +163,18 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
     with torch.no_grad():
         for batch in validation_ds:
             count += 1
-            encoder_input = batch["encoder_input"].to(device)
-            encoder_mask = batch["encoder_mask"].to(device)
+            encoder_input = batch["encoder_input"].to(device) # (b, seq_len)
+            encoder_mask = batch["encoder_mask"].to(device) # (b, 1, 1, seq_len)
 
             # check that the batch size is 1
             assert encoder_input.size(
                 0) == 1, "Batch size must be 1 for validation"
 
-            model_out = greedy_decode(
-                model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
+            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
 
             source_text = batch["src_text"][0]
             target_text = batch["tgt_text"][0]
-            model_out_text = tokenizer_tgt.decode(model_out.cpu().numpy())
+            model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
 
             source_texts.append(source_text)
             target_texts.append(target_text)
@@ -252,7 +251,6 @@ def get_config():
     return {
         "batch_size": 4,
         "num_epochs": 20,
-        "accum_iter": 10,
         "base_lr": 1.0,
         "seq_len": 512,
         "warmup": 10000,
@@ -291,38 +289,40 @@ def train_model():
     global_step = 0
     for epoch in range(config['num_epochs']):
         model.train()
-        epoch_step = 0
         batch_iterator = tqdm(train_dataloader, desc=f"Processing Epoch {epoch:02d}")
         for batch in batch_iterator:
-            encoder_input = batch['encoder_input'].to(device)
-            decoder_input = batch['decoder_input'].to(device)
-            encoder_mask = batch['encoder_mask'].to(device)
-            decoder_mask = batch['decoder_mask'].to(device)
+
+            encoder_input = batch['encoder_input'].to(device) # (b, seq_len)
+            decoder_input = batch['decoder_input'].to(device) # (B, seq_len)
+            encoder_mask = batch['encoder_mask'].to(device) # (B, 1, 1, seq_len)
+            decoder_mask = batch['decoder_mask'].to(device) # (B, 1, seq_len, seq_len)
 
             # Run the tensors through the encoder, decoder and the projection layer
-            encoder_output = model.encode(encoder_input, encoder_mask)
-            decoder_output = model.decode(encoder_output, encoder_mask, decoder_input, decoder_mask)
-            proj_output = model.project(decoder_output)
+            encoder_output = model.encode(encoder_input, encoder_mask) # (B, seq_len, d_model)
+            decoder_output = model.decode(encoder_output, encoder_mask, decoder_input, decoder_mask) # (B, seq_len, d_model)
+            proj_output = model.project(decoder_output) # (B, seq_len, vocab_size)
 
             # Compare the output with the label
-            label = batch['label'].to(device)
+            label = batch['label'].to(device) # (B, seq_len)
 
             # Compute the loss using a simple cross entropy
             loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
-            batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}", "lr": f"{lr_scheduler.get_last_lr()[0]:6.1e}", "epoch step": f"{epoch_step:03d}"})
+            batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}", "lr": f"{lr_scheduler.get_last_lr()[0]:6.1e}"})
 
             # Log the loss
             writer.add_scalar('train loss', loss.item(), global_step)
             writer.flush()
 
+            # Backpropagate the loss
             loss.backward()
 
+            # Update the weights
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
-            lr_scheduler.step()  # Update learning rate schedule
+             # Update learning rate schedule
+            lr_scheduler.step() 
 
             global_step += 1
-            epoch_step += 1
 
         # Run validation at the end of every epoch
         run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
