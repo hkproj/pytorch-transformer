@@ -174,11 +174,10 @@ def get_model(config, vocab_src_len, vocab_tgt_len):
     model = build_transformer(vocab_src_len, vocab_tgt_len, config["seq_len"], config['seq_len'], d_model=config['d_model'])
     return model
 
-def train_model():
+def train_model(config):
     # Define the device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
-    config = get_config()
 
     # Make sure the weights folder exists
     Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
@@ -242,4 +241,5 @@ def train_model():
 
 if __name__ == '__main__':
     warnings.filterwarnings("ignore")
-    train_model()
+    config = get_config()
+    train_model(config)
