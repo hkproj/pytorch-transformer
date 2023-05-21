@@ -1,7 +1,8 @@
 from pathlib import Path
 import torch
 import torch.nn as nn
-from train import get_config, get_model, get_ds, run_validation
+from config import get_config
+from train import get_model, get_ds, run_validation
 
 
 if __name__ == '__main__':
