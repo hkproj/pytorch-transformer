@@ -1,5 +1,6 @@
 from model import build_transformer
 from dataset import BilingualDataset, causal_mask
+from config import get_config
 
 import torchtext.datasets as datasets
 import torch
@@ -168,21 +169,6 @@ def get_ds(config):
     val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
-
-def get_config():
-    return {
-        "batch_size": 8,
-        "num_epochs": 20,
-        "lr": 10**-4,
-        "seq_len": 350,
-        "warmup": 10000,
-        "d_model": 512,
-        "lang_src": "en",
-        "lang_tgt": "it",
-        "model_folder": "weights",
-        "model_basename": "tmodel_",
-        "tokenizer_file": "tokenizer_{0}.json",
-    }
 
 def get_model(config, vocab_src_len, vocab_tgt_len):
     model = build_transformer(vocab_src_len, vocab_tgt_len, config["seq_len"], config['seq_len'], d_model=config['d_model'])
