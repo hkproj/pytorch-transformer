@@ -14,9 +14,9 @@ if __name__ == '__main__':
     model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
 
     # Load the pretrained weights
-
-    model_folder = "weights_pretrained"
-    model_filename = f"tmodel_final.pt"
+    model_folder = config["model_folder"]
+    model_basename = config["model_basename"]
+    model_filename = f"{model_basename}final.pt"
     model.load_state_dict(torch.load(str(Path('.') / model_folder / model_filename)))
 
     # Run validation at the end of every epoch
