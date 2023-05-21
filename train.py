@@ -1,6 +1,6 @@
 from model import build_transformer
 from dataset import BilingualDataset, causal_mask
-from config import get_config
+from config import get_config, get_weights_file_path
 
 import torchtext.datasets as datasets
 import torch
@@ -187,12 +187,20 @@ def train_model(config):
     # Tensorboard
     writer = SummaryWriter()
 
+    # If the user specified a model to preload before training, load it
+    initial_epoch = 0
+    if config['preload']:
+        model_filename = get_weights_file_path(config, config['preload'])
+        initial_epoch = int(config['preload']) + 1
+        print(f'Preloading model {model_filename}')
+        model.load_state_dict(torch.load(model_filename))
+
     # Optimizer with its LR scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
     global_step = 0
-    for epoch in range(config['num_epochs']):
+    for epoch in range(initial_epoch, config['num_epochs']):
         model.train()
         batch_iterator = tqdm(train_dataloader, desc=f"Processing Epoch {epoch:02d}")
         for batch in batch_iterator:
@@ -230,13 +238,11 @@ def train_model(config):
         # Run validation at the end of every epoch
         run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
 
-        model_folder = config["model_folder"]
-        model_basename = config["model_basename"]
-        model_filename = f"{model_basename}{epoch:02d}.pt"
+        # Save the model at the end of every epoch
+        model_filename = get_weights_file_path(config, f"{epoch:02d}")
         if epoch == config['num_epochs'] - 1:
-            model_filename = f"{model_basename}final.pt"
-        # Save the model
-        torch.save(model.state_dict(), str(Path('.') / model_folder / model_filename))
+            model_filename = get_weights_file_path(config, f"final")
+        torch.save(model.state_dict(), model_filename)
 
 
 if __name__ == '__main__':
