@@ -196,18 +196,19 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
                 print_msg('-'*console_width)
                 break
     
-    # Evaluate the character error rate
-    # Compute the char error rate 
-    metric = torchmetrics.CharErrorRate()
-    cer = metric(model_out_texts, target_texts)
-    writer.add_scalar('validation cer', cer, global_step)
-    writer.flush()
+    if writer:
+        # Evaluate the character error rate
+        # Compute the char error rate 
+        metric = torchmetrics.CharErrorRate()
+        cer = metric(model_out_texts, target_texts)
+        writer.add_scalar('validation cer', cer, global_step)
+        writer.flush()
 
-    # Compute the word error rate
-    metric = torchmetrics.WordErrorRate()
-    wer = metric(model_out_texts, target_texts)
-    writer.add_scalar('validation wer', wer, global_step)
-    writer.flush()
+        # Compute the word error rate
+        metric = torchmetrics.WordErrorRate()
+        wer = metric(model_out_texts, target_texts)
+        writer.add_scalar('validation wer', wer, global_step)
+        writer.flush()
 
 def get_all_sentences(ds, lang):
     for item in ds:
