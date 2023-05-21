@@ -72,7 +72,7 @@ class PositionalEncoding(nn.Module):
 
 class ResidualConnection(nn.Module):
     
-        def __init__(self, d_model: int, dropout: float) -> None:
+        def __init__(self, dropout: float) -> None:
             super().__init__()
             self.dropout = nn.Dropout(dropout)
             self.norm = LayerNormalization()
@@ -139,7 +139,7 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.self_attention_block = self_attention_block
         self.feed_forward_block = feed_forward_block
-        self.residual_connections = nn.ModuleList([ResidualConnection(d_model, dropout) for _ in range(2)])
+        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)])
 
     def forward(self, x, src_mask):
         x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mask))
@@ -153,7 +153,7 @@ class DecoderBlock(nn.Module):
         self.self_attention_block = self_attention_block
         self.source_attention_block = source_attention_block
         self.feed_forward_block = feed_forward_block
-        self.residual_connections = nn.ModuleList([ResidualConnection(d_model, dropout) for _ in range(3)])
+        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(3)])
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
         x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, tgt_mask))
@@ -163,7 +163,7 @@ class DecoderBlock(nn.Module):
 
 class Encoder(nn.Module):
 
-    def __init__(self, d_mmodel: int, layers: nn.ModuleList) -> None:
+    def __init__(self, layers: nn.ModuleList) -> None:
         super().__init__()
         self.layers = layers
         self.norm = LayerNormalization()
@@ -175,7 +175,7 @@ class Encoder(nn.Module):
     
 class Decoder(nn.Module):
 
-    def __init__(self, d_model: int, layers: nn.ModuleList) -> None:
+    def __init__(self, layers: nn.ModuleList) -> None:
         super().__init__()
         self.layers = layers
         self.norm = LayerNormalization()
