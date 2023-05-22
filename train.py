@@ -54,14 +54,22 @@ def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_
     return decoder_input.squeeze(0)
 
 
-def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_step, writer):
+def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_step, writer, num_examples=2):
     model.eval()
-    num_examples = 2
     count = 0
 
     source_texts = []
     expected = []
     predicted = []
+
+    try:
+        # get the console window width
+        with os.popen('stty size', 'r') as console:
+            _, console_width = console.read().split()
+            console_width = int(console_width)
+    except:
+        # If we can't get the console width, use 80 as default
+        console_width = 80
 
     with torch.no_grad():
         for batch in validation_ds:
@@ -82,21 +90,12 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
             source_texts.append(source_text)
             expected.append(target_text)
             predicted.append(model_out_text)
-
-            try:
-                # get the console window width
-                with os.popen('stty size', 'r') as console:
-                    _, console_width = console.read().split()
-                    console_width = int(console_width)
-            except:
-                # If we can't get the console width, use 80 as default
-                console_width = 80
             
             # Print the source, target and model output
             print_msg('-'*console_width)
-            print_msg(f"{f'SOURCE: ':>12}{source_text[:console_width-12]}")
-            print_msg(f"{f'TARGET: ':>12}{target_text[:console_width-12]}")
-            print_msg(f"{f'PREDICTED: ':>12}{model_out_text[:console_width-12]}")
+            print_msg(f"{f'SOURCE: ':>12}{source_text}")
+            print_msg(f"{f'TARGET: ':>12}{target_text}")
+            print_msg(f"{f'PREDICTED: ':>12}{model_out_text}")
 
             if count == num_examples:
                 print_msg('-'*console_width)
