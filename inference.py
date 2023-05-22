@@ -16,6 +16,5 @@ if __name__ == '__main__':
     # Load the pretrained weights
     model_filename = get_weights_file_path(config, f"final")
     model.load_state_dict(torch.load(model_filename))
-
-    # Run validation at the end of every epoch
+    
     run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: print(msg), 0, None)
