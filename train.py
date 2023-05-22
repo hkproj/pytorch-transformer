@@ -190,16 +190,18 @@ def train_model(config):
     # Tensorboard
     writer = SummaryWriter()
 
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
+
     # If the user specified a model to preload before training, load it
     initial_epoch = 0
     if config['preload']:
         model_filename = get_weights_file_path(config, config['preload'])
-        initial_epoch = int(config['preload']) + 1
         print(f'Preloading model {model_filename}')
-        model.load_state_dict(torch.load(model_filename))
+        state = torch.load(model_filename)
+        model.load_state_dict(state['model_state_dict'])
+        initial_epoch = state['epoch'] + 1
+        optimizer.load_state_dict(state['optimizer_state_dict'])
 
-    # Optimizer with its LR scheduler
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
     global_step = 0
@@ -245,7 +247,11 @@ def train_model(config):
         model_filename = get_weights_file_path(config, f"{epoch:02d}")
         if epoch == config['num_epochs'] - 1:
             model_filename = get_weights_file_path(config, f"final")
-        torch.save(model.state_dict(), model_filename)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict()
+        }, model_filename)
 
 
 if __name__ == '__main__':
