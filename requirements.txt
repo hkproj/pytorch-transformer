@@ -1,0 +1,6 @@
+torch
+torchtext
+datasets
+tokenizers
+torchmetrics
+tensorboard
