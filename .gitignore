@@ -3,3 +3,5 @@ __pycache__
 *.json
 runs/
 weights/
+
+wandb/
